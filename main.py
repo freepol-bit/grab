@@ -2,6 +2,6 @@ from fastapi import FastAPI
 
 app = FastAPI()
 
-@app.get("/")
-def read_root():
-    return {"message": "Hello Render!"}
+@app.get("/{skey}")
+def read_skey(skey: str):
+    return {"message": f"Hello {skey}"}
