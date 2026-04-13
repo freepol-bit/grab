@@ -106,7 +106,7 @@ def get_data(skey: str):
         result["description"] = [d.get("dtlDesc") for d in ds.get("descList", []) if "dtlDesc" in d]
 
         # 3️⃣ Google Drive 저장 (본인 계정 용량 사용)
-        filename = f"{skey}.json"
+        filename = f"{skey}.txt"
         upload_to_drive(filename, result)
 
         return {
