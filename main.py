@@ -5,12 +5,24 @@ app = FastAPI()
 
 @app.get("/{skey}")
 def get_data(skey: str):
-    url = f"https://sd.wips.co.kr/wipslink/doc/docContJson.wips?skey={skey}&tabGb=DS"
-    
+    base_url = "https://sd.wips.co.kr/wipslink/doc/docContJson.wips"
+    tabs = ["DS", "AB", "CL"]
+
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
+    result = {}
+
     try:
-        resp = requests.get(url, timeout=10)
-        resp.raise_for_status()
-        return resp.json()  # JSON 그대로 반환
+        for tab in tabs:
+            url = f"{base_url}?skey={skey}&tabGb={tab}"
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+
+            result[tab] = resp.json()
+
+        return result
 
     except Exception as e:
         return {"error": str(e)}
