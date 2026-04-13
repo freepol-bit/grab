@@ -1,6 +1,7 @@
 from fastapi import FastAPI
 import requests
 import json
+import os
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
@@ -8,17 +9,23 @@ import io
 
 app = FastAPI()
 
+# 👉 네 Google Drive 폴더 ID
 FOLDER_ID = "1Mh3gAlf63tq5_oiKAP4k-d5FAHbA6Z6o"
 
-# 🔐 Google Drive 인증
+
+# 🔐 Google Drive 인증 (환경변수 사용)
 def get_drive_service():
-    creds = service_account.Credentials.from_service_account_file(
-        "credentials.json",
+    creds_dict = json.loads(os.environ["GOOGLE_CREDENTIALS"])
+
+    creds = service_account.Credentials.from_service_account_info(
+        creds_dict,
         scopes=["https://www.googleapis.com/auth/drive"]
     )
+
     return build("drive", "v3", credentials=creds)
 
-# 📤 파일 업로드
+
+# 📤 Google Drive 업로드
 def upload_to_drive(filename, data):
     service = get_drive_service()
 
@@ -27,7 +34,9 @@ def upload_to_drive(filename, data):
         "parents": [FOLDER_ID]
     }
 
-    file_stream = io.BytesIO(json.dumps(data, ensure_ascii=False).encode("utf-8"))
+    file_stream = io.BytesIO(
+        json.dumps(data, ensure_ascii=False).encode("utf-8")
+    )
 
     media = MediaIoBaseUpload(file_stream, mimetype="application/json")
 
@@ -38,12 +47,20 @@ def upload_to_drive(filename, data):
     ).execute()
 
 
+@app.get("/")
+def root():
+    return {"message": "FastAPI + Google Drive OK"}
+
+
 @app.get("/{skey}")
 def get_data(skey: str):
     base_url = "https://sd.wips.co.kr/wipslink/doc/docContJson.wips"
     tabs = ["DS", "AB", "CL"]
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
+
     raw = {}
 
     try:
@@ -55,31 +72,39 @@ def get_data(skey: str):
             raw[tab] = resp.json()
 
         # 2️⃣ 데이터 정제
-        result = {}
         ab = raw.get("AB", {})
         ds = raw.get("DS", {})
         cl = raw.get("CL", {})
 
-        result["SKEY"] = skey
-        result["Pubnum"] = ab.get("docPageSummaryRsltVO", {}).get("mngNum")
-        result["Applnum"] = ab.get("docPageSummaryRsltVO", {}).get("applNum")
+        result = {
+            "SKEY": skey,
+            "Pubnum": ab.get("docPageSummaryRsltVO", {}).get("mngNum"),
+            "Applnum": ab.get("docPageSummaryRsltVO", {}).get("applNum"),
+            "title": None,
+            "image": ds.get("docPageDescriptionRsltVO", {}).get("exmpDrwImg"),
+            "abstract": None,
+            "claims": [],
+            "description": []
+        }
 
+        # title
         try:
             result["title"] = ab["docPageSummaryRsltVO"]["invTiList"][0]["invTi"]
         except:
-            result["title"] = None
+            pass
 
-        result["image"] = ds.get("docPageDescriptionRsltVO", {}).get("exmpDrwImg")
-
+        # abstract
         try:
             result["abstract"] = ab["docPageSummaryRsltVO"]["abList"][1]["ab"]
         except:
-            result["abstract"] = None
+            pass
 
+        # claims
         result["claims"] = [
             c.get("cl") for c in cl.get("clList", []) if "cl" in c
         ]
 
+        # description
         result["description"] = [
             d.get("dtlDesc") for d in ds.get("descList", []) if "dtlDesc" in d
         ]
@@ -89,10 +114,13 @@ def get_data(skey: str):
         upload_to_drive(filename, result)
 
         return {
-            "message": "success",
-            "file": filename,
+            "status": "success",
+            "file_uploaded": filename,
             "data": result
         }
 
     except Exception as e:
-        return {"error": str(e)}
+        return {
+            "status": "error",
+            "message": str(e)
+        }
