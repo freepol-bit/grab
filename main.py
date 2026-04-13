@@ -10,12 +10,11 @@ import io
 
 app = FastAPI()
 
-# 👉 구글 드라이브 폴더 ID (본인의 폴더 ID로 유지)
+# 👉 구글 드라이브 폴더 ID
 FOLDER_ID = "1Mh3gAlf63tq5_oiKAP4k-d5FAHbA6Z6o"
 
 # 🔐 Google Drive OAuth 2.0 인증 함수
 def get_drive_service():
-    # Render 환경변수 'GOOGLE_USER_CREDENTIALS'에 저장한 JSON 문자열 로드
     creds_json = os.environ.get("GOOGLE_USER_CREDENTIALS")
     if not creds_json:
         raise Exception("환경변수 GOOGLE_USER_CREDENTIALS를 찾을 수 없습니다.")
@@ -23,29 +22,54 @@ def get_drive_service():
     creds_info = json.loads(creds_json)
     creds = Credentials.from_authorized_user_info(creds_info)
 
-    # 🔄 토큰이 만료되었다면 refresh_token을 사용하여 자동 갱신
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
     
     return build("drive", "v3", credentials=creds)
 
-# 📤 Google Drive 업로드 함수
+# 📤 Google Drive 업로드 함수 (NotebookLM 최적화 버전)
 def upload_to_drive(filename, data):
     service = get_drive_service()
 
     file_metadata = {
         "name": filename,
-        "parents": [FOLDER_ID]
+        "parents": [FOLDER_ID],
+        "mimeType": "text/plain"  # 드라이브 상의 파일 타입 명시
     }
 
-    # 데이터를 JSON 바이너리로 변환
-    file_stream = io.BytesIO(
-        json.dumps(data, ensure_ascii=False).encode("utf-8")
-    )
+    # 1️⃣ NotebookLM이 읽기 좋게 "문서 형태"로 텍스트 구성
+    content_parts = []
+    content_parts.append(f"제목: {data.get('title') or '제목 없음'}")
+    content_parts.append(f"SKEY: {data.get('SKEY')}")
+    content_parts.append(f"공개번호: {data.get('Pubnum') or '정보 없음'}")
+    content_parts.append(f"출원번호: {data.get('Applnum') or '정보 없음'}")
+    content_parts.append("\n[요약]\n" + (data.get('abstract') or "요약 정보가 없습니다."))
+    
+    content_parts.append("\n[청구항]")
+    claims = data.get('claims', [])
+    if claims:
+        for i, claim in enumerate(claims, 1):
+            content_parts.append(f"제 {i}항: {claim}")
+    else:
+        content_parts.append("청구항 정보가 없습니다.")
 
-    media = MediaIoBaseUpload(file_stream, mimetype="application/json")
+    content_parts.append("\n[상세설명]")
+    description = data.get('description', [])
+    if description:
+        content_parts.extend(description)
+    else:
+        content_parts.append("상세설명 정보가 없습니다.")
 
-    # 파일 생성 실행
+    # 전체 리스트를 하나의 문자열로 합침
+    full_text = "\n".join(content_parts)
+
+    # 2️⃣ UTF-8 인코딩으로 바이너리 스트림 생성
+    file_stream = io.BytesIO(full_text.encode("utf-8"))
+
+    # 3️⃣ 미디어 업로드 설정 (mimetype 중요)
+    media = MediaIoBaseUpload(file_stream, mimetype="text/plain", resumable=True)
+
+    # 4️⃣ 파일 생성 실행
     service.files().create(
         body=file_metadata,
         media_body=media,
@@ -81,38 +105,40 @@ def get_data(skey: str):
             "Pubnum": ab.get("docPageSummaryRsltVO", {}).get("mngNum"),
             "Applnum": ab.get("docPageSummaryRsltVO", {}).get("applNum"),
             "title": None,
-            "image": ds.get("docPageDescriptionRsltVO", {}).get("exmpDrwImg"),
             "abstract": None,
             "claims": [],
             "description": []
         }
 
-        # 제목 추출 안전하게 처리
+        # 제목 추출
         try:
             inv_ti_list = ab.get("docPageSummaryRsltVO", {}).get("invTiList", [])
             if inv_ti_list:
                 result["title"] = inv_ti_list[0].get("invTi")
         except: pass
 
-        # 요약 추출 안전하게 처리
+        # 요약 추출
         try:
             ab_list = ab.get("docPageSummaryRsltVO", {}).get("abList", [])
             if len(ab_list) > 1:
                 result["abstract"] = ab_list[1].get("ab")
         except: pass
 
-        # 청구항 및 상세설명 리스트 처리
-        result["claims"] = [c.get("cl") for c in cl.get("clList", []) if "cl" in c]
-        result["description"] = [d.get("dtlDesc") for d in ds.get("descList", []) if "dtlDesc" in d]
+        # 청구항 및 상세설명 처리
+        result["claims"] = [c.get("cl") for c in cl.get("clList", []) if c.get("cl")]
+        result["description"] = [d.get("dtlDesc") for d in ds.get("descList", []) if d.get("dtlDesc")]
 
-        # 3️⃣ Google Drive 저장 (본인 계정 용량 사용)
+        # 3️⃣ Google Drive 저장 (확장자 .txt 및 텍스트 포맷팅 적용)
         filename = f"{skey}.txt"
         upload_to_drive(filename, result)
 
         return {
             "status": "success",
             "file_uploaded": filename,
-            "data": result
+            "data_summary": {
+                "title": result["title"],
+                "claims_count": len(result["claims"])
+            }
         }
 
     except Exception as e:
