@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Response # Response 추가
+from fastapi.responses import PlainTextResponse # PlainTextResponse 추가
 import requests
 import json
 import os
@@ -14,31 +15,25 @@ app = FastAPI()
 # 👉 구글 드라이브 폴더 ID
 FOLDER_ID = "1Mh3gAlf63tq5_oiKAP4k-d5FAHbA6Z6o"
 
-# ✨ 텍스트 정제 함수
 def clean_text(raw_html):
-    if not raw_html:
-        return ""
+    if not raw_html: return ""
     clean = re.sub(r'<[^>]*>', ' ', raw_html)
     clean = re.sub(r'\?.*?\?', '', clean)
     clean = re.sub(r'\s+', ' ', clean).strip()
     return clean
 
-# 🔐 Google Drive OAuth 2.0 인증 함수
 def get_drive_service():
     creds_json = os.environ.get("GOOGLE_USER_CREDENTIALS")
     if not creds_json:
         raise Exception("환경변수 GOOGLE_USER_CREDENTIALS를 찾을 수 없습니다.")
-    
     creds_info = json.loads(creds_json)
     creds = Credentials.from_authorized_user_info(creds_info)
-
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())
-    
     return build("drive", "v3", credentials=creds)
 
-# 📤 Google Drive 업로드 및 공유 링크 생성 함수
-def upload_to_drive(filename, data):
+# 📤 Google Drive 업로드 함수 (원래 기능 유지: 권한 설정 및 링크 반환 추가)
+def upload_to_drive(filename, full_text):
     service = get_drive_service()
 
     file_metadata = {
@@ -46,35 +41,6 @@ def upload_to_drive(filename, data):
         "parents": [FOLDER_ID]
     }
 
-    # 1️⃣ 텍스트 구성
-    content_parts = []
-    content_parts.append(f"제목: {clean_text(data.get('title')) or '제목 없음'}")
-    content_parts.append(f"SKEY: {data.get('SKEY')}")
-    content_parts.append(f"공개번호: {data.get('Pubnum') or '정보 없음'}")
-    content_parts.append(f"출원번호: {data.get('Applnum') or '정보 없음'}")
-    
-    content_parts.append("\n[요약]")
-    content_parts.append(clean_text(data.get('abstract')) or "요약 정보가 없습니다.")
-    
-    content_parts.append("\n[청구항]")
-    claims = data.get('claims', [])
-    if claims:
-        for i, claim in enumerate(claims, 1):
-            content_parts.append(f"제 {i}항: {clean_text(claim)}")
-    else:
-        content_parts.append("청구항 정보가 없습니다.")
-
-    content_parts.append("\n[상세설명]")
-    description = data.get('description', [])
-    if description:
-        full_desc = "\n".join([clean_text(d) for d in description if d])
-        content_parts.append(full_desc)
-    else:
-        content_parts.append("상세설명 정보가 없습니다.")
-
-    full_text = "\n".join(content_parts)
-
-    # 2️⃣ 업로드
     file_stream = io.BytesIO(full_text.encode("utf-8"))
     media = MediaIoBaseUpload(file_stream, mimetype="text/plain", resumable=True)
 
@@ -86,21 +52,17 @@ def upload_to_drive(filename, data):
     
     file_id = file.get("id")
 
-    # 3️⃣ 공유 권한 설정 (링크가 있는 모든 사용자에게 읽기 권한 부여)
+    # 링크 공유 권한 설정
     service.permissions().create(
         fileId=file_id,
         body={'type': 'anyone', 'role': 'reader'}
     ).execute()
 
-    # 4️⃣ 공유 링크 가져오기
+    # 링크 가져오기
     file_info = service.files().get(fileId=file_id, fields="webViewLink").execute()
     return file_info.get("webViewLink")
 
-@app.get("/")
-def root():
-    return {"message": "FastAPI + Google Drive Clean Text API Running"}
-
-@app.get("/{skey}")
+@app.get("/{skey}", response_class=PlainTextResponse) # 반환 타입을 텍스트로 지정
 def get_data(skey: str):
     base_url = "https://sd.wips.co.kr/wipslink/doc/docContJson.wips"
     tabs = ["DS", "AB", "CL"]
@@ -118,40 +80,48 @@ def get_data(skey: str):
         ds = raw.get("DS", {})
         cl = raw.get("CL", {})
 
-        result = {
-            "SKEY": skey,
-            "Pubnum": ab.get("docPageSummaryRsltVO", {}).get("mngNum"),
-            "Applnum": ab.get("docPageSummaryRsltVO", {}).get("applNum"),
-            "title": None,
-            "abstract": None,
-            "claims": [],
-            "description": []
-        }
+        # 데이터 정리
+        title = clean_text(ab.get("docPageSummaryRsltVO", {}).get("invTiList", [{}])[0].get("invTi")) or "제목 없음"
+        pub_num = ab.get("docPageSummaryRsltVO", {}).get("mngNum") or "정보 없음"
+        appl_num = ab.get("docPageSummaryRsltVO", {}).get("applNum") or "정보 없음"
+        abstract = clean_text(ab.get("docPageSummaryRsltVO", {}).get("abList", [{}, {}])[1].get("ab")) or "요약 정보가 없습니다."
+        
+        claims = [clean_text(c.get("cl")) for c in cl.get("clList", []) if c.get("cl")]
+        description = [clean_text(d.get("dtlDesc")) for d in ds.get("descList", []) if d.get("dtlDesc")]
 
-        try:
-            inv_ti_list = ab.get("docPageSummaryRsltVO", {}).get("invTiList", [])
-            if inv_ti_list: result["title"] = inv_ti_list[0].get("invTi")
-        except: pass
+        # 1️⃣ 구글 드라이브에 저장할 텍스트 구성 (기본 형식 유지)
+        drive_content = [
+            f"제목: {title}",
+            f"SKEY: {skey}",
+            f"공개번호: {pub_num}",
+            f"출원번호: {appl_num}",
+            "\n[요약]", abstract,
+            "\n[청구항]"
+        ]
+        for i, c in enumerate(claims, 1): drive_content.append(f"제 {i}항: {c}")
+        drive_content.append("\n[상세설명]")
+        drive_content.extend(description)
+        
+        full_text_for_drive = "\n".join(drive_content)
+        
+        # 2️⃣ 드라이브 업로드 및 링크 생성
+        drive_link = upload_to_drive(f"{skey}.txt", full_text_for_drive)
 
-        try:
-            ab_list = ab.get("docPageSummaryRsltVO", {}).get("abList", [])
-            if len(ab_list) > 1: result["abstract"] = ab_list[1].get("ab")
-        except: pass
+        # 3️⃣ 웹 브라우저에 보여줄 텍스트 구성 (SKEY 바로 다음에 공유 링크 추가)
+        web_display_content = [
+            f"제목: {title}",
+            f"SKEY: {skey}",
+            f"공유링크: {drive_link}",  # <--- 웹 화면 출력 시에만 SKEY 밑에 추가
+            f"공개번호: {pub_num}",
+            f"출원번호: {appl_num}",
+            "\n[요약]", abstract,
+            "\n[청구항]"
+        ]
+        for i, c in enumerate(claims, 1): web_display_content.append(f"제 {i}항: {c}")
+        web_display_content.append("\n[상세설명]")
+        web_display_content.extend(description)
 
-        result["claims"] = [c.get("cl") for c in cl.get("clList", []) if c.get("cl")]
-        result["description"] = [d.get("dtlDesc") for d in ds.get("descList", []) if d.get("dtlDesc")]
-
-        # 3️⃣ Google Drive 저장 및 링크 받기
-        filename = f"{skey}.txt"
-        drive_link = upload_to_drive(filename, result)
-
-        # 응답 순서 조정: SKEY 바로 다음에 link 배치
-        return {
-            "status": "success",
-            "SKEY": skey,
-            "drive_link": drive_link,  # SKEY 바로 다음에 위치
-            "file_uploaded": filename
-        }
+        return "\n".join(web_display_content)
 
     except Exception as e:
-        return {"status": "error", "message": str(e)}
+        return f"Error: {str(e)}"
