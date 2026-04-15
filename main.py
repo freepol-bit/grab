@@ -2,7 +2,7 @@ from fastapi import FastAPI
 import requests
 import json
 import os
-import re  # 정규식 라이브러리 추가
+import re
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
@@ -14,15 +14,12 @@ app = FastAPI()
 # 👉 구글 드라이브 폴더 ID
 FOLDER_ID = "1Mh3gAlf63tq5_oiKAP4k-d5FAHbA6Z6o"
 
-# ✨ 텍스트 정제 함수 (HTML 태그 및 특수 메타데이터 제거)
+# ✨ 텍스트 정제 함수
 def clean_text(raw_html):
     if not raw_html:
         return ""
-    # 1. <...> 형태의 모든 HTML/XML 태그 제거
     clean = re.sub(r'<[^>]*>', ' ', raw_html)
-    # 2. <?...?> 형태의 XML 선언문 제거
     clean = re.sub(r'\?.*?\?', '', clean)
-    # 3. 연속된 공백 및 줄바꿈 정리
     clean = re.sub(r'\s+', ' ', clean).strip()
     return clean
 
@@ -40,7 +37,7 @@ def get_drive_service():
     
     return build("drive", "v3", credentials=creds)
 
-# 📤 Google Drive 업로드 함수
+# 📤 Google Drive 업로드 및 공유 링크 생성 함수
 def upload_to_drive(filename, data):
     service = get_drive_service()
 
@@ -49,7 +46,7 @@ def upload_to_drive(filename, data):
         "parents": [FOLDER_ID]
     }
 
-    # 1️⃣ 모든 항목에 대해 clean_text 적용하여 텍스트 구성
+    # 1️⃣ 텍스트 구성
     content_parts = []
     content_parts.append(f"제목: {clean_text(data.get('title')) or '제목 없음'}")
     content_parts.append(f"SKEY: {data.get('SKEY')}")
@@ -63,7 +60,6 @@ def upload_to_drive(filename, data):
     claims = data.get('claims', [])
     if claims:
         for i, claim in enumerate(claims, 1):
-            # 청구항 내부의 태그도 모두 제거
             content_parts.append(f"제 {i}항: {clean_text(claim)}")
     else:
         content_parts.append("청구항 정보가 없습니다.")
@@ -71,24 +67,34 @@ def upload_to_drive(filename, data):
     content_parts.append("\n[상세설명]")
     description = data.get('description', [])
     if description:
-        # 리스트 내의 각 문장을 정제하여 합침
         full_desc = "\n".join([clean_text(d) for d in description if d])
         content_parts.append(full_desc)
     else:
         content_parts.append("상세설명 정보가 없습니다.")
 
-    # 전체 리스트를 하나의 문자열로 합침
     full_text = "\n".join(content_parts)
 
-    # 2️⃣ 바이너리 변환 및 업로드
+    # 2️⃣ 업로드
     file_stream = io.BytesIO(full_text.encode("utf-8"))
     media = MediaIoBaseUpload(file_stream, mimetype="text/plain", resumable=True)
 
-    service.files().create(
+    file = service.files().create(
         body=file_metadata,
         media_body=media,
         fields="id"
     ).execute()
+    
+    file_id = file.get("id")
+
+    # 3️⃣ 공유 권한 설정 (링크가 있는 모든 사용자에게 읽기 권한 부여)
+    service.permissions().create(
+        fileId=file_id,
+        body={'type': 'anyone', 'role': 'viewer'}
+    ).execute()
+
+    # 4️⃣ 공유 링크 가져오기
+    file_info = service.files().get(fileId=file_id, fields="webViewLink").execute()
+    return file_info.get("webViewLink")
 
 @app.get("/")
 def root():
@@ -122,7 +128,6 @@ def get_data(skey: str):
             "description": []
         }
 
-        # 데이터 추출 (정제 전 원본 데이터 수집)
         try:
             inv_ti_list = ab.get("docPageSummaryRsltVO", {}).get("invTiList", [])
             if inv_ti_list: result["title"] = inv_ti_list[0].get("invTi")
@@ -136,12 +141,15 @@ def get_data(skey: str):
         result["claims"] = [c.get("cl") for c in cl.get("clList", []) if c.get("cl")]
         result["description"] = [d.get("dtlDesc") for d in ds.get("descList", []) if d.get("dtlDesc")]
 
-        # 3️⃣ Google Drive 저장 (clean_text 로직 포함됨)
+        # 3️⃣ Google Drive 저장 및 링크 받기
         filename = f"{skey}.txt"
-        upload_to_drive(filename, result)
+        drive_link = upload_to_drive(filename, result)
 
+        # 응답 순서 조정: SKEY 바로 다음에 link 배치
         return {
             "status": "success",
+            "SKEY": skey,
+            "drive_link": drive_link,  # SKEY 바로 다음에 위치
             "file_uploaded": filename
         }
 
