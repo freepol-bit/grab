@@ -89,7 +89,7 @@ def upload_to_drive(filename, data):
     # 3️⃣ 공유 권한 설정 (링크가 있는 모든 사용자에게 읽기 권한 부여)
     service.permissions().create(
         fileId=file_id,
-        body={'type': 'anyone', 'role': 'viewer'}
+        body={'type': 'anyone', 'role': 'reader'}
     ).execute()
 
     # 4️⃣ 공유 링크 가져오기
